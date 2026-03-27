@@ -1,573 +1,112 @@
-================================================================================
-  DAY 14 WORKSPACE SUBMISSION — Working with Multiple Providers (Part 1)
-  Terraform 30-Day Challenge | Felix Nahor | March 27, 2026
-================================================================================
+DAY 14 WORKSPACE SUBMISSION — Working with Multiple Providers | Felix Nahor
+======================================================================
 
-
-────────────────────────────────────────────────────────────────────────────────
 SECTION 1 — PROVIDER CONFIGURATION
-────────────────────────────────────────────────────────────────────────────────
-
-## required_providers block (versions.tf)
-
+----------------------------------------------------------------------
 terraform {
   required_version = ">= 1.0.0"
-
   required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }
+    aws = { source = "hashicorp/aws", version = "~> 5.0" }
   }
 }
+provider "aws" { region = var.primary_region }      # default us-east-1
+provider "aws" { alias = "us_west"; region = var.secondary_region } # us-west-2
 
-## Provider Configurations (providers.tf)
-
-# Default provider — primary region (us-east-1)
-provider "aws" {
-  region = var.primary_region
-}
-
-# Aliased provider — secondary region (us-west-2)
-provider "aws" {
-  alias  = "us_west"
-  region = var.secondary_region
-}
-
-## Explanation of Each Argument
-
-required_version = ">= 1.0.0"
-  Tells Terraform to refuse to run if the Terraform CLI version is older than
-  1.0.0. This prevents running the configuration on a very old binary that may
-  not support the syntax or resources used. It is a floor, not a ceiling.
-
-required_providers block
-  Declares every provider plugin this configuration needs before Terraform can
-  do anything. Without this block Terraform would not know where to download
-  the provider from or what version to accept.
-
-source = "hashicorp/aws"
-  The fully-qualified registry address: <namespace>/<type>. This tells
-  Terraform to download the plugin from
-  registry.terraform.io/hashicorp/aws. If you were using a third-party
-  provider it would look like "mycompany/customprovider".
-
-version = "~> 5.0"
-  A pessimistic constraint operator. It means: accept any version >= 5.0 but
-  < 6.0. This allows minor and patch updates (5.1, 5.2, 5.99) but blocks a
-  major-version bump to 6.0 which could contain breaking changes. Terraform
-  selected 5.100.0 at init time and locked it in .terraform.lock.hcl.
-
-provider "aws" { region = var.primary_region }
-  The DEFAULT provider configuration. Any aws_* resource that does NOT
-  explicitly name a provider will automatically use this one. The region
-  argument tells the AWS SDK which regional API endpoint to send requests to
-  (in our case us-east-1).
-
-provider "aws" { alias = "us_west" ... }
-  An ALIASED provider configuration. You cannot have two provider blocks with
-  the same type and no alias — Terraform would reject that. The alias argument
-  gives this second instance a unique label ("us_west") so resources can
-  reference it explicitly. By itself an aliased provider is never used unless
-  a resource explicitly asks for it with provider = aws.us_west.
+required_version: Rejects CLI older than 1.0.0.
+source: Registry address (hashicorp/aws).
+version "~> 5.0": >= 5.0 AND < 6.0 — minor updates allowed, major breaks blocked.
+Default provider: auto-used by any aws_* resource with no explicit provider arg.
+alias "us_west": second AWS instance for us-west-2; used only when provider = aws.us_west.
 
 
-────────────────────────────────────────────────────────────────────────────────
 SECTION 2 — MULTI-REGION DEPLOYMENT CODE
-────────────────────────────────────────────────────────────────────────────────
-
-## Full multi-region resource code (main.tf)
-
-# ─────────────────────────────────────────────────
-# PRIMARY BUCKET  —  us-east-1  (default provider)
-# ─────────────────────────────────────────────────
-resource "aws_s3_bucket" "primary" {
-  bucket        = "${var.bucket_prefix}-primary-${var.account_id}"
+----------------------------------------------------------------------
+resource "aws_s3_bucket" "primary" {              # default → us-east-1
+  bucket = "${var.bucket_prefix}-primary-${var.account_id}"
   force_destroy = true
-
-  tags = {
-    Name      = "Day14 Primary Bucket"
-    Region    = var.primary_region
-    Challenge = "day14-multi-provider"
-  }
 }
-
 resource "aws_s3_bucket_versioning" "primary" {
   bucket = aws_s3_bucket.primary.id
-
-  versioning_configuration {
-    status = "Enabled"
-  }
+  versioning_configuration { status = "Enabled" }
 }
-
-resource "aws_s3_bucket_public_access_block" "primary" {
-  bucket = aws_s3_bucket.primary.id
-
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-# ─────────────────────────────────────────────────
-# REPLICA BUCKET  —  us-west-2  (aliased provider)
-# ─────────────────────────────────────────────────
-resource "aws_s3_bucket" "replica" {
-  provider      = aws.us_west          # <-- explicit alias reference
-  bucket        = "${var.bucket_prefix}-replica-${var.account_id}"
+resource "aws_s3_bucket" "replica" {              # aliased → us-west-2
+  provider = aws.us_west
+  bucket   = "${var.bucket_prefix}-replica-${var.account_id}"
   force_destroy = true
-
-  tags = {
-    Name      = "Day14 Replica Bucket"
-    Region    = var.secondary_region
-    Challenge = "day14-multi-provider"
-  }
 }
-
 resource "aws_s3_bucket_versioning" "replica" {
   provider = aws.us_west
   bucket   = aws_s3_bucket.replica.id
-
-  versioning_configuration {
-    status = "Enabled"
-  }
+  versioning_configuration { status = "Enabled" }
 }
-
-resource "aws_s3_bucket_public_access_block" "replica" {
-  provider = aws.us_west
-  bucket   = aws_s3_bucket.replica.id
-
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-# ─────────────────────────────────────────────────
-# REPLICATION CONFIGURATION  —  primary → replica
-# ─────────────────────────────────────────────────
 resource "aws_s3_bucket_replication_configuration" "replication" {
-  depends_on = [
-    aws_s3_bucket_versioning.primary,
-    aws_s3_bucket_versioning.replica
-  ]
-
-  role   = aws_iam_role.replication.arn
-  bucket = aws_s3_bucket.primary.id
-
-  rule {
-    id     = "replicate-all"
-    status = "Enabled"
-
-    destination {
-      bucket        = aws_s3_bucket.replica.arn
-      storage_class = "STANDARD"
-    }
-  }
+  depends_on = [aws_s3_bucket_versioning.primary, aws_s3_bucket_versioning.replica]
+  role = aws_iam_role.replication.arn; bucket = aws_s3_bucket.primary.id
+  rule { id = "replicate-all"; status = "Enabled"
+    destination { bucket = aws_s3_bucket.replica.arn; storage_class = "STANDARD" } }
 }
 
-## How Terraform Decides Which API Endpoint to Call for Each Resource
-
-Every provider plugin contains a hardcoded mapping from its "type" name
-(e.g. "aws") to API base URLs per region. When Terraform processes each
-resource block it follows this exact lookup order:
-
-  1. Does the resource block contain an explicit `provider = aws.<alias>` meta-
-     argument? If yes, use that provider instance and its configured region.
-
-  2. If no explicit provider is given, look up the provider type the resource
-     belongs to (all aws_* resources belong to "aws"), then find the provider
-     block with that type and NO alias — the default provider. Use its region.
-
-In our code:
-
-  aws_s3_bucket.primary         → no provider arg → uses default provider
-                                   → AWS S3 API endpoint for us-east-1
-                                   → https://s3.us-east-1.amazonaws.com
-
-  aws_s3_bucket.replica         → provider = aws.us_west
-                                   → AWS S3 API endpoint for us-west-2
-                                   → https://s3.us-west-2.amazonaws.com
-
-  aws_s3_bucket_replication_    → no provider arg → uses default provider
-  configuration.replication       → us-east-1 (correct — replication config
-                                   lives on the source bucket)
-
-  aws_iam_role.replication      → no provider arg → uses default provider
-                                   → IAM is a global service but all IAM API
-                                   calls are routed through us-east-1
-
-The provider meta-argument format is always: provider = <type>.<alias>
-You cannot pass just an alias string — it must use dot notation.
+Endpoint resolution: explicit provider = aws.<alias> wins; otherwise default provider.
+  primary → default → us-east-1 | replica → aws.us_west → us-west-2
 
 
-────────────────────────────────────────────────────────────────────────────────
-SECTION 3 — .terraform.lock.hcl EXPLANATION
-────────────────────────────────────────────────────────────────────────────────
-
-## Lock File Contents
-
-# This file is maintained automatically by "terraform init".
-# Manual edits may be lost in future updates.
-
+SECTION 3 — .terraform.lock.hcl
+----------------------------------------------------------------------
 provider "registry.terraform.io/hashicorp/aws" {
   version     = "5.100.0"
   constraints = "~> 5.0"
   hashes = [
     "h1:H3mU/7URhP0uCRGK8jeQRKxx2XFzEqLiOq/L2Bbiaxs=",
     "zh:054b8dd49f0549c9a7cc27d159e45327b7b65cf404da5e5a20da154b90b8a644",
-    "zh:0b97bf8d5e03d15d83cc40b0530a1f84b459354939ba6f135a0086c20ebbe6b2",
-    "zh:1589a2266af699cbd5d80737a0fe02e54ec9cf2ca54e7e00ac51c7359056f274",
-    "zh:6330766f1d85f01ae6ea90d1b214b8b74cc8c1badc4696b165b36ddd4cc15f7b",
-    "zh:7c8c2e30d8e55291b86fcb64bdf6c25489d538688545eb48fd74ad622e5d3862",
-    "zh:99b1003bd9bd32ee323544da897148f46a527f622dc3971af63ea3e251596342",
-    "zh:9b12af85486a96aedd8d7984b0ff811a4b42e3d88dad1a3fb4c0b580d04fa425",
-    "zh:9f8b909d3ec50ade83c8062290378b1ec553edef6a447c56dadc01a99f4eaa93",
-    "zh:aaef921ff9aabaf8b1869a86d692ebd24fbd4e12c21205034bb679b9caf883a2",
-    "zh:ac882313207aba00dd5a76dbd572a0ddc818bb9cbf5c9d61b28fe30efaec951e",
-    "zh:bb64e8aff37becab373a1a0cc1080990785304141af42ed6aa3dd4913b000421",
-    "zh:dfe495f6621df5540d9c92ad40b8067376350b005c637ea6efac5dc15028add4",
-    "zh:f0ddf0eaf052766cfe09dea8200a946519f653c384ab4336e2a4a64fdd6310e9",
-    "zh:f1b7e684f4c7ae1eed272b6de7d2049bb87a0275cb04dbb7cda6636f600699c9",
-    "zh:ff461571e3f233699bf690db319dfe46aec75e58726636a0d97dd9ac6e32fb70",
+    ... (13 more zh: entries for each OS/arch)
   ]
 }
 
-## What Each Field Records
-
-version = "5.100.0"
-  The EXACT provider version that was selected and installed when
-  `terraform init` ran. This is not a range — it is the single pinned version
-  that all future inits on this codebase must use unless you explicitly run
-  `terraform init -upgrade`. In our case Terraform evaluated the constraint
-  "~> 5.0", found 5.100.0 to be the latest satisfying version, downloaded it,
-  and wrote this exact version here.
-
-constraints = "~> 5.0"
-  A record of the version constraint that was active in versions.tf at the
-  time the lock entry was written. This is informational — it helps you audit
-  whether the locked version is still within the declared constraint without
-  having to cross-reference another file.
-
-hashes = [...]
-  Cryptographic checksums of the provider binary, recorded for every platform
-  Terraform knows about. There are two hash formats:
-
-    h1:  — A hash of the zip archive itself (the download artifact). Used to
-           verify the binary you downloaded matches what was originally locked.
-           This is the fast check Terraform does on subsequent inits.
-
-    zh:  — A hash of each individual file inside the zip. These are the
-           "ziphash" entries. They allow Terraform to verify the contents of
-           the unpacked provider directory against the registry's own published
-           checksums, even across different operating systems and
-           architectures. The 15 zh: entries correspond to the provider
-           binaries for linux/amd64, darwin/arm64, windows/amd64, etc.
-
-  When you run `terraform init` after the lock file exists, Terraform does NOT
-  re-download the provider if the version matches. It instead verifies the
-  already-installed binary against the stored hashes. If the hash does not
-  match, Terraform aborts with an error — this protects against supply chain
-  attacks where a registry might serve a tampered binary.
-
-## Why This File Must Be Committed to Version Control
-
-  1. Reproducibility — Every developer, every CI pipeline, and every
-     deployment system clones the repo and runs `terraform init`. Without the
-     lock file each person gets whatever "latest matching" version the registry
-     is serving that day. With the lock file they all get 5.100.0.
-
-  2. Safety — The ~> 5.0 constraint allows any 5.x version. If a bug is
-     introduced in 5.101.0, teams without a lock file will silently pick it up
-     on their next init. Teams with a committed lock file are protected.
-
-  3. Security — The hashes in the lock file are the root of trust. Committing
-     them means any tampered provider binary will fail checksum verification
-     before it can execute a single Terraform operation.
-
-  4. Auditability — A git blame on the lock file shows exactly when and why
-     a provider was upgraded, creating a clear trail in your version history.
-
-The .terraform/ directory (the actual provider binaries) should NOT be
-committed — only the lock file. The binaries are large, platform-specific,
-and fully reproducible from the lock file via `terraform init`.
+version: Exact version every future init must use.
+constraints: Range from versions.tf, for auditing.
+h1: SHA256 of the downloaded zip — verified on each init.
+zh: Per-file checksums across all OS/arch — detects tampered binaries.
+Commit it: guarantees reproducibility for all devs/CI and rejects tampered binaries.
 
 
-────────────────────────────────────────────────────────────────────────────────
 SECTION 4 — MULTI-ACCOUNT SETUP
-────────────────────────────────────────────────────────────────────────────────
+----------------------------------------------------------------------
+provider "aws" { alias = "production"; region = "us-east-1"
+  assume_role { role_arn = "arn:aws:iam::111111111111:role/TerraformDeployRole" } }
+provider "aws" { alias = "staging"; region = "us-east-1"
+  assume_role { role_arn = "arn:aws:iam::222222222222:role/TerraformDeployRole" } }
 
-## assume_role Provider Configuration
-
-# Provider for the production account
-provider "aws" {
-  alias  = "production"
-  region = "us-east-1"
-
-  assume_role {
-    role_arn = "arn:aws:iam::111111111111:role/TerraformDeployRole"
-  }
-}
-
-# Provider for the staging account
-provider "aws" {
-  alias  = "staging"
-  region = "us-east-1"
-
-  assume_role {
-    role_arn = "arn:aws:iam::222222222222:role/TerraformDeployRole"
-  }
-}
-
-## What This Configuration Does (Without a Second Account)
-
-I currently operate from a single AWS account (189979486358) so I did not
-deploy resources in multiple accounts during today's challenge. However, I
-configured the providers above and understand exactly what they would do:
-
-  1. Terraform calls AWS STS (Security Token Service) AssumeRole API with the
-     role_arn for each provider alias.
-
-  2. STS returns temporary credentials (AccessKeyId, SecretAccessKey,
-     SessionToken) that are scoped to the permissions of TerraformDeployRole
-     in the target account.
-
-  3. All AWS API calls made by resources referencing that provider alias
-     (e.g. provider = aws.production) are authenticated with those temporary
-     credentials — meaning they land in account 111111111111, not in the
-     operator's own account.
-
-  4. The temporary credentials last for a maximum of 1 hour by default (can
-     be extended up to 12 hours with max_session_duration on the role). For
-     long-running terraform apply operations you may need to increase this.
-
-## What IAM Permissions TerraformDeployRole Would Need
-
-The role in the TARGET account must trust the SOURCE account's identity in
-its trust policy:
-
-  Trust Policy on TerraformDeployRole (in account 111111111111):
-  {
-    "Version": "2012-10-17",
-    "Statement": [
-      {
-        "Effect": "Allow",
-        "Principal": {
-          "AWS": "arn:aws:iam::189979486358:user/Felix-user"
-        },
-        "Action": "sts:AssumeRole"
-      }
-    ]
-  }
-
-  Permissions Policy attached to TerraformDeployRole:
-  The role needs whatever permissions match the resources you are deploying.
-  For our S3 + IAM replication setup it would need at minimum:
-    - s3:CreateBucket, s3:DeleteBucket, s3:PutBucketVersioning,
-      s3:PutBucketPublicAccessBlock, s3:PutReplicationConfiguration,
-      s3:GetReplicationConfiguration, s3:ListBucket
-    - iam:CreateRole, iam:DeleteRole, iam:CreatePolicy, iam:DeletePolicy,
-      iam:AttachRolePolicy, iam:DetachRolePolicy, iam:PassRole,
-      iam:GetRole, iam:GetPolicy, iam:ListAttachedRolePolicies
-
-  The operator's own user/role in account 189979486358 needs:
-    - sts:AssumeRole on
-      arn:aws:iam::111111111111:role/TerraformDeployRole
-
-## Plan Output Would Show (Example)
-
-  Terraform would show resources prefixed with the provider alias so you can
-  see at a glance which account each resource targets:
-
-  # aws_s3_bucket.prod_bucket (provider: aws.production) will be created
-  + resource "aws_s3_bucket" "prod_bucket" {
-      + bucket = "my-prod-bucket"
-      + ...
-    }
-
-  # aws_s3_bucket.staging_bucket (provider: aws.staging) will be created
-  + resource "aws_s3_bucket" "staging_bucket" {
-      + bucket = "my-staging-bucket"
-      + ...
-    }
+One account only — no cross-account deploy. Terraform calls STS AssumeRole,
+gets temporary credentials, routes all calls for that alias through them.
+TerraformDeployRole needs: trust Felix-user to assume it; permissions: s3:*,
+iam:CreateRole, iam:AttachRolePolicy, iam:PassRole.
 
 
-────────────────────────────────────────────────────────────────────────────────
 SECTION 5 — CHAPTER 7 LEARNINGS
-────────────────────────────────────────────────────────────────────────────────
+----------------------------------------------------------------------
+terraform init: 1. Parse required_providers. 2. Read lock file. 3. Query registry,
+select version. 4. Download binary to .terraform/. 5. Verify checksums. 6. Update lock.
 
-## What happens during `terraform init` from a provider perspective?
+version vs ~> version: "5.100.0" = exact pin. "~> 5.0" = >= 5.0 AND < 6.0;
+the lock file then pins the exact chosen version.
 
-When you run `terraform init`, Terraform goes through these steps specifically
-for providers:
-
-  1. Parse required_providers — Terraform reads every .tf file in the current
-     directory and collects the required_providers blocks. It builds a map of
-     provider type → source address → version constraint.
-
-  2. Read the lock file — If .terraform.lock.hcl already exists, Terraform
-     reads it to find previously selected versions and their hashes.
-
-  3. Resolve versions — For each required provider, Terraform queries the
-     Terraform Registry API to get the list of available versions and applies
-     the constraint to pick the best match. If the lock file already pins a
-     version, that pinned version is used instead of re-querying (unless you
-     pass -upgrade).
-
-  4. Download the plugin — Terraform downloads the provider binary for your
-     operating system and CPU architecture from the registry. The binary is a
-     compiled Go executable that speaks the Terraform Plugin Protocol over gRPC.
-     It is saved to .terraform/providers/<source>/<version>/<os_arch>/.
-
-  5. Verify checksums — Terraform computes hashes of the downloaded binary and
-     compares them against the registry's published checksums AND the hashes
-     in the lock file (if present). A mismatch aborts init immediately.
-
-  6. Update the lock file — If no lock file exists, Terraform creates one with
-     the selected version and all platform hashes. If a lock file exists and
-     the version is unchanged, nothing changes. If -upgrade was used and a new
-     version was selected, the lock file is updated.
-
-  After init, running `terraform init` again on the same directory is fast
-  because the binary is already cached and the lock file prevents re-resolving
-  the version. Only if you delete .terraform/ or run with -upgrade does it
-  re-download.
-
-## What is the difference between `version` and `~> version`?
-
-  version = "5.100.0"  — An EXACT version pin. Only 5.100.0 is accepted.
-                          No higher, no lower. Maximally strict.
-
-  version = "~> 5.0"   — A PESSIMISTIC CONSTRAINT. The ~> operator means
-                          "allow the rightmost version component to increment
-                          freely, but never allow the component to its left
-                          to change."
-
-                          ~> 5.0   means >= 5.0 AND < 6.0
-                          ~> 5.1   means >= 5.1 AND < 6.0
-                          ~> 5.1.2 means >= 5.1.2 AND < 5.2.0
-
-  In practice, the right approach for production code is to use ~> with the
-  major version to allow automatic patch and minor updates while blocking
-  breaking major version changes, then rely on the lock file to pin the exact
-  version that is actually in use. This gives you both flexibility and safety.
-
-  Other operators (for completeness):
-    >= 5.0        — any version 5.0 or newer (no upper bound — risky)
-    >= 5.0, < 6.0 — explicit range (equivalent to ~> 5.0)
-    = 5.100.0     — same as "5.100.0" (exact pin)
-
-## Why does every resource need exactly one provider, and how does Terraform
-   determine which one to use when none is specified?
-
-  A provider is the translation layer between a Terraform resource declaration
-  and a cloud API. Without a provider, Terraform has no code to call — it
-  literally cannot make API requests. Every resource type is "owned" by exactly
-  one provider (e.g. all aws_* types are owned by the AWS provider, all
-  google_* types are owned by the Google provider). Allowing a resource to use
-  multiple providers simultaneously would be logically incoherent because each
-  provider has its own authentication context, API endpoint, and state model.
-
-  Terraform's provider resolution order when no explicit provider is set:
-
-    1. Terraform reads the resource type prefix. For "aws_s3_bucket", the
-       provider type is "aws".
-
-    2. Terraform looks for a provider block of type "aws" with NO alias field.
-       This is the default provider for that type.
-
-    3. If a default provider exists, it is used for this resource.
-
-    4. If NO default provider exists (only aliased ones), Terraform will error
-       at plan time:
-         Error: No default provider found for "aws". Resources using "aws_*"
-         must explicitly set the provider argument when only aliased
-         configurations exist.
-
-  This is why, in our code, the IAM role and the replication configuration
-  resource (which runs in the source account/region) do not need an explicit
-  provider — they naturally fall to the default us-east-1 provider. Only the
-  replica bucket and its associated resources need `provider = aws.us_west`
-  because they must land in a different region.
+One provider per resource: aws_* belongs to the aws type. Terraform resolves
+the instance — explicit provider = arg wins; otherwise the default (no-alias)
+provider is used. Only-aliased providers with no explicit arg → error at plan.
 
 
-────────────────────────────────────────────────────────────────────────────────
 SECTION 6 — CHALLENGES AND FIXES
-────────────────────────────────────────────────────────────────────────────────
+----------------------------------------------------------------------
+1. depends_on for replication — AWS rejects replication config if versioning
+   not active. No attribute reference linked them, so explicit depends_on needed.
 
-## 1. depends_on Required for Replication Configuration
+2. Missing alias on replica sub-resources — versioning/public-access-block
+   defaulted to us-east-1 and errored. Fixed: added provider = aws.us_west
+   to every resource tied to the replica bucket.
 
-  Problem: The aws_s3_bucket_replication_configuration resource was created
-  before versioning was fully active on both buckets. AWS requires versioning
-  to be in "Enabled" state on both source and destination before it will accept
-  a replication configuration. Without an explicit dependency, Terraform's
-  parallel execution graph would sometimes race and attempt to create the
-  replication config before the versioning resources finished.
+3. LocationConstraint null — get-bucket-location returns null for us-east-1;
+   expected AWS behavior. us-west-2 correctly returned its region name.
 
-  Fix: Added an explicit depends_on block to the replication configuration
-  resource listing both versioning resources:
+4. Replication verified live: PENDING → COMPLETED → REPLICA in ~10 seconds.
 
-    depends_on = [
-      aws_s3_bucket_versioning.primary,
-      aws_s3_bucket_versioning.replica
-    ]
-
-  This forced Terraform's dependency graph to serialize these resources
-  correctly even though there was no direct attribute reference between them.
-
-## 2. Replica Bucket Versioning Needed provider = aws.us_west
-
-  Problem: The aws_s3_bucket_versioning.replica and
-  aws_s3_bucket_public_access_block.replica resources initially did not have
-  an explicit provider argument. Terraform tried to manage them using the
-  default us-east-1 provider and received an error because the bucket they
-  referenced (aws_s3_bucket.replica.id) exists in us-west-2.
-
-  Fix: Added provider = aws.us_west to every resource that attaches to or
-  operates on the replica bucket. The rule is: any resource whose target
-  resource is in a non-default region must carry the same provider alias as
-  that resource.
-
-## 3. S3 LocationConstraint null for us-east-1
-
-  Observation (not a bug): When running:
-    aws s3api get-bucket-location --bucket day14-multi-region-primary-...
-
-  The response was:  { "LocationConstraint": null }
-
-  This is correct and expected. AWS S3 treats us-east-1 as the "classic"
-  region and returns null instead of "us-east-1" for the LocationConstraint
-  field. Every other region returns its name explicitly. The replica bucket
-  in us-west-2 correctly returned "LocationConstraint": "us-west-2".
-
-## 4. No Multi-Account Access Available
-
-  I only have one AWS account (189979486358) in this environment. I configured
-  the assume_role provider blocks and documented what they do and what
-  permissions TerraformDeployRole would require, but did not deploy resources
-  across accounts. The plan output section in Section 4 shows what the output
-  would look like if two accounts were available.
-
-## 5. Replication Test — Object Status Lifecycle
-
-  After uploading a test file to the primary bucket, the ReplicationStatus
-  field on the source object went through these states:
-
-    PENDING   — S3 has queued the object for replication but has not yet
-                transferred it to us-west-2.
-
-    COMPLETED — S3 finished copying the object to the replica bucket. The
-                object now exists in us-west-2 with ReplicationStatus = REPLICA.
-
-    REPLICA   — (On the destination object) This object was created by
-                replication, not by a direct PUT. It cannot itself be a
-                replication source.
-
-  Total replication latency observed: approximately 10 seconds for a 60-byte
-  text file. Real workloads with larger objects will have higher latency but
-  S3 CRR (Cross-Region Replication) provides an SLA of replication within
-  15 minutes for 99.99% of objects.
-
-================================================================================
-  END OF DAY 14 WORKSPACE SUBMISSION
-================================================================================
+======================================================================
